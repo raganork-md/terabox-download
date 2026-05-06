@@ -1,115 +1,149 @@
-import os
 import asyncio
-import aiohttp
-import aiofiles
+import logging
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from config import Config
+from pyrogram.enums import ParseMode
+from config import API_ID, API_HASH, BOT_TOKEN
 from terabox import TeraboxDownloader
 
-bot = Client(
+# Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# Bot client
+app = Client(
     "terabox_bot",
-    api_id=Config.API_ID,
-    api_hash=Config.API_HASH,
-    bot_token=Config.BOT_TOKEN
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
 )
 
-terabox = TeraboxDownloader()
+# Downloader instance
+downloader = TeraboxDownloader()
 
-@bot.on_message(filters.command("start"))
+# Start command
+@app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
-    await message.reply_text(
-        "🎬 **Terabox Downloader Bot**\n\n"
-        "📤 Terabox link അയക്കൂ, ഞാൻ download ചെയ്തു തരാം!\n\n"
-        "✅ Supported: terabox.com, 1024tera.com, teraboxapp.com etc.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Developer", url="https://t.me/your_username")]
-        ])
-    )
+    text = """
+🎬 **Terabox Downloader Bot**
 
-@bot.on_message(filters.text & filters.private)
+ഹായ്! ഞാൻ Terabox files download ചെയ്യാൻ സഹായിക്കും!
+
+**Supported Domains:**
+• terabox.com
+• teraboxapp.com  
+• 1024tera.com
+• freeterabox.com
+• mirrobox.com
+• nephobox.com
+• 4funbox.com
+
+**ഉപയോഗിക്കാൻ:**
+Terabox link അയച്ചാൽ മതി! 🔗
+
+Made with ❤️
+"""
+    await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+# Help command
+@app.on_message(filters.command("help") & filters.private)
+async def help_cmd(client: Client, message: Message):
+    text = """
+📚 **Help**
+
+**Commands:**
+/start - Bot start ചെയ്യുക
+/help - ഈ message
+
+**How to use:**
+1. Terabox link copy ചെയ്യുക
+2. Bot-ലേക്ക് paste ചെയ്യുക
+3. Download button click ചെയ്യുക
+
+**Tips:**
+• Valid terabox link ഉപയോഗിക്കുക
+• Private files work ആകില്ല
+"""
+    await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+# Handle terabox links
+@app.on_message(filters.text & filters.private & ~filters.command(["start", "help"]))
 async def handle_link(client: Client, message: Message):
     url = message.text.strip()
     
-    if not terabox.is_valid_url(url):
+    # Validate URL
+    if not downloader.is_valid_url(url):
+        await message.reply_text("❌ Valid Terabox link അയക്കൂ!")
         return
     
-    status_msg = await message.reply_text("⏳ **Processing...**\n\nFile info എടുക്കുന്നു...")
+    # Processing message
+    status_msg = await message.reply_text("⏳ Processing link...")
     
     try:
-        info = await terabox.get_download_link(url)
+        # Get file info
+        info = await downloader.get_info(url)
         
         if "error" in info:
-            await status_msg.edit_text(f"❌ **Error:** {info['error']}\n\n🔄 Link ശരിയാണോ എന്ന് check ചെയ്യൂ!")
+            await status_msg.edit_text(info["error"])
             return
         
+        # Prepare response
         filename = info.get("filename", "Unknown")
-        size_str = info.get("size_str", "Unknown")
-        size = info.get("size", 0)
-        download_link = info.get("fast_link") or info.get("download_link")
+        size = info.get("size", "Unknown")
+        download_link = info.get("download_link", "")
+        thumb = info.get("thumb", "")
         
-        await status_msg.edit_text(
-            f"📁 **File Found!**\n\n"
-            f"📝 **Name:** `{filename}`\n"
-            f"📊 **Size:** {size_str}\n\n"
-            f"⬇️ Downloading..."
-        )
+        if not download_link:
+            await status_msg.edit_text("❌ Download link കിട്ടിയില്ല!")
+            return
         
-        # Download file
-        file_path = f"downloads/{filename}"
-        os.makedirs("downloads", exist_ok=True)
+        text = f"""
+✅ **File Found!**
+
+📁 **Name:** `{filename}`
+📦 **Size:** {size}
+
+⬇️ Download button click ചെയ്യുക!
+"""
         
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://www.terabox.com/"
-        }
+        buttons = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬇️ Download", url=download_link)],
+            [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{url[:50]}")]
+        ])
         
-        downloaded = 0
-        async with aiohttp.ClientSession() as session:
-            async with session.get(download_link, headers=headers, timeout=aiohttp.ClientTimeout(total=3600)) as resp:
-                if resp.status != 200:
-                    await status_msg.edit_text(f"❌ Download failed! Status: {resp.status}")
-                    return
-                
-                async with aiofiles.open(file_path, 'wb') as f:
-                    async for chunk in resp.content.iter_chunked(1024 * 1024):
-                        await f.write(chunk)
-                        downloaded += len(chunk)
-                        percent = (downloaded / size * 100) if size > 0 else 0
-                        
-                        if downloaded % (5 * 1024 * 1024) == 0:
-                            await status_msg.edit_text(
-                                f"📁 **{filename}**\n"
-                                f"📊 {size_str}\n\n"
-                                f"⬇️ **Downloading:** {percent:.1f}%\n"
-                                f"📥 {terabox._format_size(downloaded)} / {size_str}"
-                            )
-        
-        await status_msg.edit_text(f"📤 **Uploading to Telegram...**\n\n📁 {filename}")
-        
-        # Upload to Telegram
-        await message.reply_document(
-            document=file_path,
-            caption=f"📁 **{filename}**\n📊 **Size:** {size_str}\n\n🤖 @YourBotUsername",
-            progress=progress_callback,
-            progress_args=(status_msg, "Uploading")
-        )
-        
-        await status_msg.delete()
-        
-        # Cleanup
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        # Send with thumbnail if available
+        if thumb:
+            try:
+                await status_msg.delete()
+                await message.reply_photo(
+                    photo=thumb,
+                    caption=text,
+                    reply_markup=buttons,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except:
+                await status_msg.edit_text(text, reply_markup=buttons, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await status_msg.edit_text(text, reply_markup=buttons, parse_mode=ParseMode.MARKDOWN)
             
     except Exception as e:
-        await status_msg.edit_text(f"❌ **Error:** {str(e)}")
+        logger.error(f"Error: {e}")
+        await status_msg.edit_text(f"⚠️ Error: {str(e)}")
 
-async def progress_callback(current, total, message, action):
-    percent = current * 100 / total
-    try:
-        await message.edit_text(f"📤 **{action}:** {percent:.1f}%")
-    except:
-        pass
+# Callback handler
+@app.on_callback_query(filters.regex(r"^refresh:"))
+async def refresh_callback(client, callback_query):
+    await callback_query.answer("🔄 Link refresh ചെയ്യുക manually!")
 
-print("Bot Starting...")
-bot.run()
+# Main
+async def main():
+    logger.info("Starting bot...")
+    await app.start()
+    logger.info("Bot started successfully!")
+    await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    app.run(main())
